@@ -137,13 +137,84 @@ app.get('/verify-session', async (req, res) => {
     if (session.payment_status === 'paid') {
       const plan = session.metadata?.plan || 'starter';
       console.log('✅ Payment verified, plan:', plan);
-      res.json({ plan, status: 'active' });
+      res.json({ 
+        plan, 
+        status: 'active',
+        stripeCustomerId: session.customer,       // ← NEW
+        stripeSubscriptionId: session.subscription // ← NEW
+      });
     } else {
       res.json({ plan: null, status: session.payment_status });
     }
 
   } catch (err) {
     console.error('❌ Verify error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Cancel Subscription ─────────────────────────────────────────────────
+app.post('/cancel-subscription', async (req, res) => {
+  if (!stripe) {
+    return res.status(500).json({ error: 'Stripe not configured' });
+  }
+
+  try {
+    const { stripeSubscriptionId, userId } = req.body;
+
+    if (!stripeSubscriptionId) {
+      return res.status(400).json({ error: 'Missing stripeSubscriptionId' });
+    }
+
+    console.log('Cancelling subscription:', stripeSubscriptionId, 'for user:', userId);
+
+    // Cancel at period end (user keeps access until billing period ends)
+    // Change to stripe.subscriptions.cancel() for immediate cancellation
+    const subscription = await stripe.subscriptions.update(stripeSubscriptionId, {
+      cancel_at_period_end: true
+    });
+
+    console.log('✅ Subscription cancelled:', subscription.id);
+    console.log('   Cancels at:', new Date(subscription.current_period_end * 1000).toISOString());
+
+    res.json({ 
+      success: true, 
+      message: 'Subscription will cancel at end of billing period',
+      cancelAt: new Date(subscription.current_period_end * 1000).toISOString()
+    });
+
+  } catch (err) {
+    console.error('❌ Cancel error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Cancel Subscription Immediately ─────────────────────────────────────
+app.post('/cancel-subscription-now', async (req, res) => {
+  if (!stripe) {
+    return res.status(500).json({ error: 'Stripe not configured' });
+  }
+
+  try {
+    const { stripeSubscriptionId, userId } = req.body;
+
+    if (!stripeSubscriptionId) {
+      return res.status(400).json({ error: 'Missing stripeSubscriptionId' });
+    }
+
+    console.log('Immediately cancelling subscription:', stripeSubscriptionId);
+
+    const subscription = await stripe.subscriptions.cancel(stripeSubscriptionId);
+
+    console.log('✅ Subscription cancelled immediately:', subscription.id);
+
+    res.json({ 
+      success: true, 
+      message: 'Subscription cancelled immediately'
+    });
+
+  } catch (err) {
+    console.error('❌ Cancel error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
