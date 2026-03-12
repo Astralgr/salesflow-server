@@ -120,7 +120,7 @@ app.post('/create-checkout-session', async (req, res) => {
   }
 });
 
-// ── Verify Session (called after payment redirect) ──────────────────────
+// ── Verify Session ──────────────────────────────────────────────────────
 app.get('/verify-session', async (req, res) => {
   if (!stripe) {
     return res.status(500).json({ error: 'Stripe not configured' });
@@ -136,12 +136,29 @@ app.get('/verify-session', async (req, res) => {
 
     if (session.payment_status === 'paid') {
       const plan = session.metadata?.plan || 'starter';
-      console.log('✅ Payment verified, plan:', plan);
+      
+      // Get subscription details for period end date
+      let periodEnd = null;
+      let billing = 'monthly';
+      
+      if (session.subscription) {
+        const subscription = await stripe.subscriptions.retrieve(session.subscription);
+        periodEnd = new Date(subscription.current_period_end * 1000).toISOString();
+        
+        // Detect billing period from interval
+        const interval = subscription.items?.data?.[0]?.price?.recurring?.interval;
+        billing = interval === 'year' ? 'annual' : 'monthly';
+      }
+      
+      console.log('✅ Payment verified, plan:', plan, 'period ends:', periodEnd);
+      
       res.json({ 
         plan, 
         status: 'active',
-        stripeCustomerId: session.customer,       // ← NEW
-        stripeSubscriptionId: session.subscription // ← NEW
+        billing: billing,
+        stripeCustomerId: session.customer,
+        stripeSubscriptionId: session.subscription,
+        periodEnd: periodEnd
       });
     } else {
       res.json({ plan: null, status: session.payment_status });
@@ -189,8 +206,8 @@ app.post('/cancel-subscription', async (req, res) => {
   }
 });
 
-// ── Cancel Subscription Immediately ─────────────────────────────────────
-app.post('/cancel-subscription-now', async (req, res) => {
+// ── Cancel Subscription (at end of billing period) ──────────────────────
+app.post('/cancel-subscription', async (req, res) => {
   if (!stripe) {
     return res.status(500).json({ error: 'Stripe not configured' });
   }
@@ -202,19 +219,58 @@ app.post('/cancel-subscription-now', async (req, res) => {
       return res.status(400).json({ error: 'Missing stripeSubscriptionId' });
     }
 
-    console.log('Immediately cancelling subscription:', stripeSubscriptionId);
+    console.log('Cancelling subscription at period end:', stripeSubscriptionId);
 
-    const subscription = await stripe.subscriptions.cancel(stripeSubscriptionId);
+    // Cancel at period end — user keeps access until billing period ends
+    const subscription = await stripe.subscriptions.update(stripeSubscriptionId, {
+      cancel_at_period_end: true
+    });
 
-    console.log('✅ Subscription cancelled immediately:', subscription.id);
+    const periodEnd = new Date(subscription.current_period_end * 1000).toISOString();
+
+    console.log('✅ Subscription set to cancel at:', periodEnd);
 
     res.json({ 
       success: true, 
-      message: 'Subscription cancelled immediately'
+      cancelAt: periodEnd,
+      plan: subscription.metadata?.plan || 'starter'
     });
 
   } catch (err) {
     console.error('❌ Cancel error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Reactivate Subscription (undo cancellation) ─────────────────────────
+app.post('/reactivate-subscription', async (req, res) => {
+  if (!stripe) {
+    return res.status(500).json({ error: 'Stripe not configured' });
+  }
+
+  try {
+    const { stripeSubscriptionId } = req.body;
+
+    if (!stripeSubscriptionId) {
+      return res.status(400).json({ error: 'Missing stripeSubscriptionId' });
+    }
+
+    console.log('Reactivating subscription:', stripeSubscriptionId);
+
+    // Remove the cancel_at_period_end flag
+    const subscription = await stripe.subscriptions.update(stripeSubscriptionId, {
+      cancel_at_period_end: false
+    });
+
+    console.log('✅ Subscription reactivated:', subscription.id);
+
+    res.json({ 
+      success: true, 
+      message: 'Subscription reactivated'
+    });
+
+  } catch (err) {
+    console.error('❌ Reactivate error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
